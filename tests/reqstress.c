@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2021 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -39,20 +39,14 @@ char ipc_template[]    = "ipc:///tmp/nng_reqstress_%d";
 char ws_template[]     = "ws://127.0.0.1:%d/nng_reqstress";
 
 char *templates[] = {
-#ifdef NNG_TRANSPORT_TCP
 	tcp4_template,
-#endif
 // It would be nice to test TCPv6, but CI doesn't support it.
 // Outside of CI, it does seem to work though.
 #ifdef NNG_TEST_TCPV6
 	tcp6_template,
 #endif
-#ifdef NNG_TRANSPORT_INPROC
 	inproc_template,
-#endif
-#ifdef NNG_TRANSPORT_IPC
 	ipc_template,
-#endif
 #ifdef NNG_TRANSPORT_WS
 	ws_template,
 #endif
@@ -275,8 +269,6 @@ Main({
 	int   i;
 	int   tmo;
 	char *str;
-
-	atexit(nng_fini);
 
 	if (((str = ConveyGetEnv("STRESSTIME")) == NULL) ||
 	    ((tmo = atoi(str)) < 1)) {

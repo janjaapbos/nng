@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -29,10 +29,9 @@ typedef struct nni_ws_dialer   nni_ws_dialer;
 // on INADDR_ANY port 80, with path "/".  For connect side, INADDR_ANY
 // makes no sense.  (TBD: return NNG_EADDRINVAL, or try loopback?)
 
-// Much of the websocket API is still "private", meeaning you should not
+// Much of the websocket API is still "private", meaning you should not
 // rely upon it being around.
 extern int nni_ws_listener_alloc(nng_stream_listener **, const nni_url *);
 extern int nni_ws_dialer_alloc(nng_stream_dialer **, const nni_url *);
-extern int nni_ws_checkopt(const char *, const void *, size_t, nni_type);
 
 #endif // NNG_SUPPLEMENTAL_WEBSOCKET_WEBSOCKET_H

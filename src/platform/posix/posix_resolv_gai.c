@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -12,23 +12,18 @@
 
 #ifdef NNG_USE_POSIX_RESOLV_GAI
 
-#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/uio.h>
 #include <sys/un.h>
-#include <unistd.h>
 
 // We use a single resolver taskq - but we allocate a few threads
 // for it to ensure that names can be looked up concurrently.  This isn't
-// as elegant or scaleable as a true asynchronous resolver would be, but
+// as elegant or scalable as a true asynchronous resolver would be, but
 // it has the advantage of being fairly portable, and concurrent enough for
 // the vast, vast majority of use cases.  The total thread count can be
 // changed with this define.  Note that some platforms may not have a
@@ -46,15 +41,21 @@ static nni_thr  resolv_thrs[NNG_RESOLV_CONCURRENCY];
 
 typedef struct resolv_item resolv_item;
 struct resolv_item {
-	int          family;
-	int          passive;
-	const char * name;
-	int          proto;
-	int          socktype;
-	uint16_t     port;
-	nni_aio *    aio;
-	nng_sockaddr sa;
+	int           family;
+	bool          passive;
+	char *        host;
+	char *        serv;
+	nni_aio *     aio;
+	nng_sockaddr *sa;
 };
+
+static void
+resolv_free_item(resolv_item *item)
+{
+	nni_strfree(item->serv);
+	nni_strfree(item->host);
+	NNI_FREE_STRUCT(item);
+}
 
 static void
 resolv_cancel(nni_aio *aio, void *arg, int rv)
@@ -73,13 +74,14 @@ resolv_cancel(nni_aio *aio, void *arg, int rv)
 		// so we can just discard everything.
 		nni_aio_list_remove(aio);
 		nni_mtx_unlock(&resolv_mtx);
-		NNI_FREE_STRUCT(item);
+		resolv_free_item(item);
 	} else {
 		// This case indicates the resolver is still processing our
 		// node. We can discard our interest in the result, but we
 		// can't interrupt the resolver itself.  (Too bad, name
 		// resolution is utterly synchronous for now.)
 		item->aio = NULL;
+		item->sa  = NULL;
 		nni_mtx_unlock(&resolv_mtx);
 	}
 	nni_aio_finish_error(aio, rv);
@@ -140,20 +142,36 @@ resolv_task(resolv_item *item)
 	// host part are split.
 	memset(&hints, 0, sizeof(hints));
 #ifdef AI_ADDRCONFIG
-	hints.ai_flags = AI_ADDRCONFIG | AI_NUMERICSERV;
-#else
-	hints.ai_flags = AI_NUMERICSERV;
+	hints.ai_flags = AI_ADDRCONFIG;
 #endif
 	if (item->passive) {
 		hints.ai_flags |= AI_PASSIVE;
 	}
-	hints.ai_protocol = item->proto;
 	hints.ai_family   = item->family;
-	hints.ai_socktype = item->socktype;
+	hints.ai_socktype = SOCK_STREAM;
+
+	// Check to see if this is a numeric port number, and if it is
+	// make sure that it's in the valid range (because Windows may
+	// incorrectly simple do a conversion and mask off upper bits.
+	if (item->serv != NULL) {
+		long  port;
+		char *end;
+		port = strtol(item->serv, &end, 10);
+		if (*end == '\0') { // we fully converted it as a number...
+			hints.ai_flags |= AI_NUMERICSERV;
+
+			// Not a valid port number.  Fail.
+			if ((port < 0) || (port > 0xffff)) {
+				rv = NNG_EADDRINVAL;
+				goto done;
+			}
+		}
+	}
 
 	// We can pass any non-zero service number, but we have to pass
 	// *something*, in case we are using a NULL hostname.
-	if ((rv = getaddrinfo(item->name, "80", &hints, &results)) != 0) {
+	if ((rv = getaddrinfo(item->host, item->serv, &hints, &results)) !=
+	    0) {
 		rv = posix_gai_errno(rv);
 		goto done;
 	}
@@ -169,28 +187,31 @@ resolv_task(resolv_item *item)
 		}
 	}
 
-	if (probe != NULL) {
+	nni_mtx_lock(&resolv_mtx);
+	if ((probe != NULL) && (item->aio != NULL)) {
 		struct sockaddr_in * sin;
 		struct sockaddr_in6 *sin6;
-		nng_sockaddr *       sa = &item->sa;
+		nng_sockaddr *       sa = item->sa;
 
 		switch (probe->ai_addr->sa_family) {
 		case AF_INET:
 			rv                 = 0;
 			sin                = (void *) probe->ai_addr;
 			sa->s_in.sa_family = NNG_AF_INET;
-			sa->s_in.sa_port   = item->port;
+			sa->s_in.sa_port   = sin->sin_port;
 			sa->s_in.sa_addr   = sin->sin_addr.s_addr;
 			break;
 		case AF_INET6:
 			rv                  = 0;
 			sin6                = (void *) probe->ai_addr;
 			sa->s_in6.sa_family = NNG_AF_INET6;
-			sa->s_in6.sa_port   = item->port;
+			sa->s_in6.sa_port   = sin6->sin6_port;
+			sa->s_in6.sa_scope  = sin6->sin6_scope_id;
 			memcpy(sa->s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
 			break;
 		}
 	}
+	nni_mtx_unlock(&resolv_mtx);
 
 done:
 
@@ -201,19 +222,18 @@ done:
 	return (rv);
 }
 
-static void
-resolv_ip(const char *host, const char *serv, int passive, int family,
-    int proto, int socktype, nni_aio *aio)
+void
+nni_resolv_ip(const char *host, const char *serv, int af, bool passive,
+    nng_sockaddr *sa, nni_aio *aio)
 {
 	resolv_item *item;
 	sa_family_t  fam;
 	int          rv;
-	int          port;
 
 	if (nni_aio_begin(aio) != 0) {
 		return;
 	}
-	switch (family) {
+	switch (af) {
 	case NNG_AF_INET:
 		fam = AF_INET;
 		break;
@@ -228,46 +248,30 @@ resolv_ip(const char *host, const char *serv, int passive, int family,
 		return;
 	}
 
-	// We can't use the resolver to look up up ports with AI_NUMERICSERV,
-	// because some resolver(s) is(are?) broken.  For example, the
-	// systemd resolver takes a port number of 1000000 and just rips off
-	// the high order bits and lets it through!
-	port = 0;
-	if (serv != NULL) {
-		while (isdigit(*serv)) {
-			port *= 10;
-			port += (*serv - '0');
-			if (port > 0xffff) {
-				// Port number out of range.
-				nni_aio_finish_error(aio, NNG_EADDRINVAL);
-				return;
-			}
-			serv++;
-		}
-		if (*serv != '\0') {
-			nni_aio_finish_error(aio, NNG_EADDRINVAL);
-			return;
-		}
-	}
-	if ((port == 0) && (!passive)) {
-		nni_aio_finish_error(aio, NNG_EADDRINVAL);
-		return;
-	}
-
 	if ((item = NNI_ALLOC_STRUCT(item)) == NULL) {
 		nni_aio_finish_error(aio, NNG_ENOMEM);
 		return;
 	}
 
-	// NB: host and serv must remain valid until this is completed.
-	memset(&item->sa, 0, sizeof(item->sa));
-	item->name     = host;
-	item->proto    = proto;
-	item->aio      = aio;
-	item->family   = fam;
-	item->passive  = passive;
-	item->socktype = socktype;
-	item->port     = htons((uint16_t) port);
+	if (serv == NULL || strcmp(serv, "") == 0) {
+		item->serv = NULL;
+	} else if ((item->serv = nni_strdup(serv)) == NULL) {
+		nni_aio_finish_error(aio, NNG_ENOMEM);
+		resolv_free_item(item);
+		return;
+	}
+	if (host == NULL) {
+		item->host = NULL;
+	} else if ((item->host = nni_strdup(host)) == NULL) {
+		nni_aio_finish_error(aio, NNG_ENOMEM);
+		resolv_free_item(item);
+		return;
+	}
+
+	item->aio     = aio;
+	item->family  = fam;
+	item->passive = passive;
+	item->sa      = sa;
 
 	nni_mtx_lock(&resolv_mtx);
 	if (resolv_fini) {
@@ -278,7 +282,7 @@ resolv_ip(const char *host, const char *serv, int passive, int family,
 	}
 	if (rv != 0) {
 		nni_mtx_unlock(&resolv_mtx);
-		NNI_FREE_STRUCT(item);
+		resolv_free_item(item);
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
@@ -288,24 +292,12 @@ resolv_ip(const char *host, const char *serv, int passive, int family,
 }
 
 void
-nni_tcp_resolv(
-    const char *host, const char *serv, int family, int passive, nni_aio *aio)
-{
-	resolv_ip(host, serv, passive, family, IPPROTO_TCP, SOCK_STREAM, aio);
-}
-
-void
-nni_udp_resolv(
-    const char *host, const char *serv, int family, int passive, nni_aio *aio)
-{
-	resolv_ip(host, serv, passive, family, IPPROTO_UDP, SOCK_DGRAM, aio);
-}
-
-void
-resolv_worker(void *notused)
+resolv_worker(void *unused)
 {
 
-	NNI_ARG_UNUSED(notused);
+	NNI_ARG_UNUSED(unused);
+
+	nni_thr_set_name(NULL, "nng:resolver");
 
 	nni_mtx_lock(&resolv_mtx);
 	for (;;) {
@@ -334,55 +326,118 @@ resolv_worker(void *notused)
 
 			nni_aio_set_prov_extra(aio, 0, NULL);
 			item->aio = NULL;
+			item->sa  = NULL;
 
-			nni_aio_set_sockaddr(aio, &item->sa);
 			nni_aio_finish(aio, rv, 0);
-
-			NNI_FREE_STRUCT(item);
 		}
+		resolv_free_item(item);
 	}
 	nni_mtx_unlock(&resolv_mtx);
 }
 
 int
-nni_ntop(const nni_sockaddr *sa, char *ipstr, char *portstr)
+parse_ip(const char *addr, nng_sockaddr *sa, bool want_port)
 {
-	const void *ap;
-	uint16_t    port;
-	int         af;
-	switch (sa->s_family) {
-	case NNG_AF_INET:
-		ap   = &sa->s_in.sa_addr;
-		port = sa->s_in.sa_port;
-		af   = AF_INET;
-		break;
-	case NNG_AF_INET6:
-		ap   = &sa->s_in6.sa_addr;
-		port = sa->s_in6.sa_port;
-		af   = AF_INET6;
-		break;
-	default:
-		return (NNG_EINVAL);
+	struct addrinfo  hints;
+	struct addrinfo *results;
+	int              rv;
+	bool             v6      = false;
+	bool             wrapped = false;
+	char *           port;
+	char *           host;
+	char *           buf;
+	size_t           buf_len;
+
+	if (addr == NULL) {
+		addr = "";
 	}
-	if (ipstr != NULL) {
-		if (af == AF_INET6) {
-			size_t l;
-			ipstr[0] = '[';
-			inet_ntop(af, ap, ipstr + 1, INET6_ADDRSTRLEN);
-			l          = strlen(ipstr);
-			ipstr[l++] = ']';
-			ipstr[l++] = '\0';
-		} else {
-			inet_ntop(af, ap, ipstr, INET6_ADDRSTRLEN);
+
+	buf_len = strlen(addr) + 1;
+	if ((buf = nni_alloc(buf_len)) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	memcpy(buf, addr, buf_len);
+	host = buf;
+	if (*host == '[') {
+		v6      = true;
+		wrapped = true;
+		host++;
+	} else {
+		char *s;
+		for (s = host; *s != '\0'; s++) {
+			if (*s == '.') {
+				break;
+			}
+			if (*s == ':') {
+				v6 = true;
+				break;
+			}
 		}
 	}
-	if (portstr != NULL) {
-#ifdef NNG_LITTLE_ENDIAN
-		port = ((port >> 8) & 0xff) | ((port & 0xff) << 8);
-#endif
-		snprintf(portstr, 6, "%u", port);
+	for (port = host; *port != '\0'; port++) {
+		if (wrapped) {
+			if (*port == ']') {
+				*port++ = '\0';
+				wrapped = false;
+				break;
+			}
+		} else if (!v6) {
+			if (*port == ':') {
+				break;
+			}
+		}
 	}
-	return (0);
+
+	if (wrapped) {
+		// Never got the closing bracket.
+		rv = NNG_EADDRINVAL;
+		goto done;
+	}
+
+	if ((!want_port) && (*port != '\0')) {
+		rv = NNG_EADDRINVAL;
+		goto done;
+	} else if (*port == ':') {
+		*port++ = '\0';
+	}
+
+	if (*port == '\0') {
+		port = "0";
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_flags = AI_NUMERICSERV | AI_NUMERICHOST | AI_PASSIVE;
+	if (v6) {
+		hints.ai_family = AF_INET6;
+	}
+#ifdef AI_ADDRCONFIG
+	hints.ai_flags |= AI_ADDRCONFIG;
+#endif
+
+	rv = getaddrinfo(host, port, &hints, &results);
+	if ((rv != 0) || (results == NULL)) {
+		rv = nni_plat_errno(rv);
+		goto done;
+	}
+	nni_posix_sockaddr2nn(
+	    sa, (void *) results->ai_addr, results->ai_addrlen);
+	freeaddrinfo(results);
+
+done:
+	nni_free(buf, buf_len);
+	return (rv);
+}
+
+int
+nni_parse_ip(const char *addr, nni_sockaddr *sa)
+{
+	return (parse_ip(addr, sa, false));
+}
+
+int
+nni_parse_ip_port(const char *addr, nni_sockaddr *sa)
+{
+	return (parse_ip(addr, sa, true));
 }
 
 int

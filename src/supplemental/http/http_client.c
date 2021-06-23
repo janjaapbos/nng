@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -9,13 +9,11 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <ctype.h>
 #include <stdbool.h>
-#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/nng_impl.h"
-#include "supplemental/tls/tls_api.h"
 
 #include <nng/supplemental/tls/tls.h>
 
@@ -34,9 +32,7 @@ struct nng_http_client {
 static void
 http_dial_start(nni_http_client *c)
 {
-	nni_aio *aio;
-
-	if ((aio = nni_list_first(&c->aios)) == NULL) {
+	if (nni_list_empty(&c->aios)) {
 		return;
 	}
 	nng_stream_dialer_dial(c->dialer, c->aio);
@@ -93,7 +89,7 @@ http_dial_cb(void *arg)
 void
 nni_http_client_fini(nni_http_client *c)
 {
-	nni_aio_fini(c->aio);
+	nni_aio_free(c->aio);
 	nng_stream_dialer_free(c->dialer);
 	nni_mtx_fini(&c->mtx);
 	NNI_FREE_STRUCT(c);
@@ -104,19 +100,15 @@ nni_http_client_init(nni_http_client **cp, const nni_url *url)
 {
 	int              rv;
 	nni_http_client *c;
-	nng_url          myurl;
+	nng_url          my_url;
+	const char *     scheme;
 
-	// Rewrite URLs to either TLS or TCP.
-	memcpy(&myurl, url, sizeof(myurl));
-	if ((strcmp(url->u_scheme, "http") == 0) ||
-	    (strcmp(url->u_scheme, "ws") == 0)) {
-		myurl.u_scheme = "tcp";
-	} else if ((strcmp(url->u_scheme, "https") == 0) ||
-	    (strcmp(url->u_scheme, "wss") == 0)) {
-		myurl.u_scheme = "tls+tcp";
-	} else {
+	if ((scheme = nni_http_stream_scheme(url->u_scheme)) == NULL) {
 		return (NNG_EADDRINVAL);
 	}
+	// Rewrite URLs to either TLS or TCP.
+	memcpy(&my_url, url, sizeof(my_url));
+	my_url.u_scheme = (char *) scheme;
 
 	if (strlen(url->u_hostname) == 0) {
 		// We require a valid hostname.
@@ -129,12 +121,12 @@ nni_http_client_init(nni_http_client **cp, const nni_url *url)
 	nni_mtx_init(&c->mtx);
 	nni_aio_list_init(&c->aios);
 
-	if ((rv = nng_stream_dialer_alloc_url(&c->dialer, &myurl)) != 0) {
+	if ((rv = nng_stream_dialer_alloc_url(&c->dialer, &my_url)) != 0) {
 		nni_http_client_fini(c);
 		return (rv);
 	}
 
-	if ((rv = nni_aio_init(&c->aio, http_dial_cb, c)) != 0) {
+	if ((rv = nni_aio_alloc(&c->aio, http_dial_cb, c)) != 0) {
 		nni_http_client_fini(c);
 		return (rv);
 	}
@@ -146,35 +138,29 @@ nni_http_client_init(nni_http_client **cp, const nni_url *url)
 int
 nni_http_client_set_tls(nni_http_client *c, nng_tls_config *tls)
 {
-	int rv;
-	rv = nni_stream_dialer_setx(c->dialer, NNG_OPT_TLS_CONFIG, &tls,
-	    sizeof(tls), NNI_TYPE_POINTER);
-	return (rv);
+	return (nng_stream_dialer_set_ptr(c->dialer, NNG_OPT_TLS_CONFIG, tls));
 }
 
 int
 nni_http_client_get_tls(nni_http_client *c, nng_tls_config **tlsp)
 {
-	size_t sz = sizeof(*tlsp);
-	int    rv;
-	rv = nni_stream_dialer_getx(
-	    c->dialer, NNG_OPT_TLS_CONFIG, tlsp, &sz, NNI_TYPE_POINTER);
-	return (rv);
+	return (nng_stream_dialer_get_ptr(
+	    c->dialer, NNG_OPT_TLS_CONFIG, (void **) tlsp));
 }
 
 int
-nni_http_client_setx(nni_http_client *c, const char *name, const void *buf,
+nni_http_client_set(nni_http_client *c, const char *name, const void *buf,
     size_t sz, nni_type t)
 {
 	// We have no local options, but we just pass them straight through.
-	return (nni_stream_dialer_setx(c->dialer, name, buf, sz, t));
+	return (nni_stream_dialer_set(c->dialer, name, buf, sz, t));
 }
 
 int
-nni_http_client_getx(
+nni_http_client_get(
     nni_http_client *c, const char *name, void *buf, size_t *szp, nni_type t)
 {
-	return (nni_stream_dialer_getx(c->dialer, name, buf, szp, t));
+	return (nni_stream_dialer_get(c->dialer, name, buf, szp, t));
 }
 
 static void
@@ -238,11 +224,10 @@ typedef struct http_txn {
 	nni_http_res *   res;
 	nni_http_chunks *chunks;
 	http_txn_state   state;
-	nni_reap_item    reap;
 } http_txn;
 
 static void
-http_txn_reap(void *arg)
+http_txn_fini(void *arg)
 {
 	http_txn *txn = arg;
 	if (txn->client != NULL) {
@@ -253,7 +238,7 @@ http_txn_reap(void *arg)
 		}
 	}
 	nni_http_chunks_free(txn->chunks);
-	nni_aio_fini(txn->aio);
+	nni_aio_reap(txn->aio);
 	NNI_FREE_STRUCT(txn);
 }
 
@@ -272,6 +257,7 @@ http_txn_cb(void *arg)
 {
 	http_txn *      txn = arg;
 	const char *    str;
+	char *          end;
 	int             rv;
 	uint64_t        len;
 	nni_iov         iov;
@@ -283,7 +269,7 @@ http_txn_cb(void *arg)
 	if ((rv = nni_aio_result(txn->aio)) != 0) {
 		http_txn_finish_aios(txn, rv);
 		nni_mtx_unlock(&http_txn_lk);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 	}
 	switch (txn->state) {
@@ -321,12 +307,13 @@ http_txn_cb(void *arg)
 		if ((nni_strcasecmp(str, "HEAD") == 0) ||
 		    ((str = nni_http_res_get_header(
 		          txn->res, "Content-Length")) == NULL) ||
-		    (nni_strtou64(str, &len) != 0) || (len == 0)) {
+		    ((len = (uint64_t) strtoull(str, &end, 10)) == 0) ||
+		    (end == NULL) || (*end != '\0')) {
 			// If no content-length, or HEAD (which per RFC
 			// never transfers data), then we are done.
 			http_txn_finish_aios(txn, 0);
 			nni_mtx_unlock(&http_txn_lk);
-			nni_reap(&txn->reap, http_txn_reap, txn);
+			http_txn_fini(txn);
 			return;
 		}
 
@@ -345,7 +332,7 @@ http_txn_cb(void *arg)
 		// All done!
 		http_txn_finish_aios(txn, 0);
 		nni_mtx_unlock(&http_txn_lk);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 
 	case HTTP_RECVING_CHUNKS:
@@ -364,7 +351,7 @@ http_txn_cb(void *arg)
 		}
 		http_txn_finish_aios(txn, 0);
 		nni_mtx_unlock(&http_txn_lk);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 	}
 
@@ -372,7 +359,7 @@ error:
 	http_txn_finish_aios(txn, rv);
 	nni_http_conn_close(txn->conn);
 	nni_mtx_unlock(&http_txn_lk);
-	nni_reap(&txn->reap, http_txn_reap, txn);
+	http_txn_fini(txn);
 }
 
 static void
@@ -407,7 +394,7 @@ nni_http_transact_conn(
 		nni_aio_finish_error(aio, NNG_ENOMEM);
 		return;
 	}
-	if ((rv = nni_aio_init(&txn->aio, http_txn_cb, txn)) != 0) {
+	if ((rv = nni_aio_alloc(&txn->aio, http_txn_cb, txn)) != 0) {
 		NNI_FREE_STRUCT(txn);
 		nni_aio_finish_error(aio, rv);
 		return;
@@ -423,7 +410,7 @@ nni_http_transact_conn(
 	if ((rv = nni_aio_schedule(aio, http_txn_cancel, txn)) != 0) {
 		nni_mtx_unlock(&http_txn_lk);
 		nni_aio_finish_error(aio, rv);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 	}
 	nni_http_res_reset(txn->res);
@@ -452,7 +439,7 @@ nni_http_transact(nni_http_client *client, nni_http_req *req,
 		nni_aio_finish_error(aio, NNG_ENOMEM);
 		return;
 	}
-	if ((rv = nni_aio_init(&txn->aio, http_txn_cb, txn)) != 0) {
+	if ((rv = nni_aio_alloc(&txn->aio, http_txn_cb, txn)) != 0) {
 		NNI_FREE_STRUCT(txn);
 		nni_aio_finish_error(aio, rv);
 		return;
@@ -460,7 +447,7 @@ nni_http_transact(nni_http_client *client, nni_http_req *req,
 
 	if ((rv = nni_http_req_set_header(req, "Connection", "close")) != 0) {
 		nni_aio_finish_error(aio, rv);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 	}
 
@@ -475,7 +462,7 @@ nni_http_transact(nni_http_client *client, nni_http_req *req,
 	if ((rv = nni_aio_schedule(aio, http_txn_cancel, txn)) != 0) {
 		nni_mtx_unlock(&http_txn_lk);
 		nni_aio_finish_error(aio, rv);
-		nni_reap(&txn->reap, http_txn_reap, txn);
+		http_txn_fini(txn);
 		return;
 	}
 	nni_http_res_reset(txn->res);

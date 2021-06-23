@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -23,6 +23,10 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef NNG_PLATFORM_OPENBSD
+#include <pthread_np.h>
+#endif
 
 #ifdef NNG_SETSTACKSIZE
 #include <limits.h>
@@ -251,6 +255,37 @@ bool
 nni_plat_thr_is_self(nni_plat_thr *thr)
 {
 	return (pthread_self() == thr->tid);
+}
+
+void
+nni_plat_thr_set_name(nni_plat_thr *thr, const char *name)
+{
+#if defined(NNG_HAVE_PTHREAD_SETNAME_NP)
+#if defined(__APPLE__)
+	// Darwin is weird, it can only set the name of pthread_self.
+	if ((thr == NULL) || (pthread_self() == thr->tid)) {
+        	pthread_setname_np(name);
+	}
+#elif defined(__NetBSD__)
+	if (thr == NULL) {
+		pthread_setname_np(pthread_self(), "%s", name);
+	} else {
+		pthread_setname_np(thr->tid, "%s", name);
+	}
+#else
+	if (thr == NULL) {
+		pthread_setname_np(pthread_self(), name);
+	} else {
+		pthread_setname_np(thr->tid, name);
+	}
+#endif
+#elif defined(NNG_HAVE_PTHREAD_SET_NAME_NP)
+	if (thr == NULL) {
+		pthread_set_name_np(pthread_self(), name);
+	} else {
+        	pthread_set_name_np(thr->tid, name);
+	}
+#endif
 }
 
 void

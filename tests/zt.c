@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2021 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -92,7 +92,7 @@ check_props(nng_msg *msg)
 		nng_duration t = 0;
 
 		So(nng_pipe_getopt_int(p, NNG_OPT_ZT_PING_TRIES, &c) == 0);
-		So(c > 0 && c < 10); // actually 5...
+		So(c > 0 && c <= 10);
 
 		So(nng_pipe_getopt_ms(p, NNG_OPT_ZT_PING_TIME, &t) == 0);
 		So(t > 1000 && t < 3600000); // 1 sec - 1 hour
@@ -130,7 +130,6 @@ TestMain("ZeroTier Transport", {
 	unsigned port;
 
 	port = 5555;
-	atexit(nng_fini);
 
 	Convey("We can register the zero tier transport",
 	    { So(nng_zt_register() == 0); });

@@ -1,5 +1,5 @@
 //
-// Copyright 2017 Garrett D'Amore <garrett@damore.org>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2017 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -76,13 +76,10 @@ extern void nni_thr_fini(nni_thr *thr);
 // nni_thr_run runs the given thread, which must have been initialized.
 extern void nni_thr_run(nni_thr *thr);
 
-// nni_thr_wait waits for the thread to complete execution, but does not
-// release resources associated with it.  It is idempotent.  If the this
-// is called before nni_thr_run is called, then the thread will not run
-// at all.
-extern void nni_thr_wait(nni_thr *thr);
-
 // nni_thr_is_self returns true if the caller is the named thread.
 extern bool nni_thr_is_self(nni_thr *thr);
+
+// nni_thr_set_name is used to set a short name for the thread.
+extern void nni_thr_set_name(nni_thr *thr, const char *);
 
 #endif // CORE_THREAD_H

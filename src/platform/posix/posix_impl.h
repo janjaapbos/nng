@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -37,7 +37,7 @@
 
 #ifdef NNG_PLATFORM_POSIX_SOCKADDR
 #include <sys/socket.h>
-extern int    nni_posix_sockaddr2nn(nni_sockaddr *, const void *);
+extern int    nni_posix_sockaddr2nn(nni_sockaddr *, const void *, size_t);
 extern size_t nni_posix_nn2sockaddr(void *, const nni_sockaddr *);
 #endif
 
@@ -83,13 +83,29 @@ struct nni_atomic_flag {
 	atomic_flag f;
 };
 
+struct nni_atomic_int {
+	atomic_int v;
+};
+
 struct nni_atomic_u64 {
-	_Atomic unsigned long long v;
+	atomic_uint_fast64_t v;
+};
+
+struct nni_atomic_bool {
+	atomic_bool v;
 };
 
 #else // NNG_HAVE_C11_ATOMIC
 struct nni_atomic_flag {
 	bool f;
+};
+
+struct nni_atomic_bool {
+	bool b;
+};
+
+struct nni_atomic_int {
+	int v;
 };
 
 struct nni_atomic_u64 {

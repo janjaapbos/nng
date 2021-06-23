@@ -205,9 +205,9 @@ extern int nni_http_server_set_tls(nni_http_server *, struct nng_tls_config *);
 extern int nni_http_server_get_tls(
     nni_http_server *, struct nng_tls_config **);
 
-extern int nni_http_server_setx(
+extern int nni_http_server_set(
     nni_http_server *, const char *, const void *, size_t, nni_type);
-extern int nni_http_server_getx(
+extern int nni_http_server_get(
     nni_http_server *, const char *, void *, size_t *, nni_type);
 
 // nni_http_server_start starts listening on the supplied port.
@@ -301,6 +301,13 @@ extern void nni_http_handler_collect_body(nni_http_handler *, bool, size_t);
 // will probably need to inspect the URL of the request.
 extern int nni_http_handler_set_tree(nni_http_handler *);
 
+// nni_http_handler_set_tree_exclusive marks the handler as servicing the
+// entire tree (e.g. a directory) exclusively, rather than just a leaf node.
+// When servicing a tree exclusively, other handlers sharing parts of the uri
+// will induce an address conflict when adding them to a server. The handler
+// will probably need to inspect the URL of the request.
+extern int nni_http_handler_set_tree_exclusive(nni_http_handler *);
+
 // nni_http_handler_set_host limits the handler to only being called for
 // the given Host: field.  This can be used to set up multiple virtual
 // hosts.  Note that host names must match exactly.  If NULL or an empty
@@ -329,8 +336,7 @@ extern int nni_http_handler_set_method(nni_http_handler *, const char *);
 extern int nni_http_handler_set_data(nni_http_handler *, void *, nni_cb);
 
 // nni_http_handler_get_data returns the data that was previously stored
-// at that index.  It returns NULL if no data was set, or an invalid index
-// is supplied.
+// by nni_http_handler_set_data.
 extern void *nni_http_handler_get_data(nni_http_handler *);
 
 // nni_http_handler_get_uri returns the URI set on the handler.
@@ -353,9 +359,9 @@ extern int nni_http_client_set_tls(nni_http_client *, struct nng_tls_config *);
 extern int nni_http_client_get_tls(
     nni_http_client *, struct nng_tls_config **);
 
-extern int nni_http_client_setx(
-    nni_http_client *, const char *, const void *, size_t, nni_type);
-extern int nni_http_client_getx(
+extern int nni_http_client_set(
+    nni_http_client *, const char *, const void *buf, size_t, nni_type);
+extern int nni_http_client_get(
     nni_http_client *, const char *, void *, size_t *, nni_type);
 
 extern void nni_http_client_connect(nni_http_client *, nni_aio *);
@@ -375,5 +381,9 @@ extern void nni_http_transact_conn(
 // to reply with a chunked transfer encoding.
 extern void nni_http_transact(
     nni_http_client *, nni_http_req *, nni_http_res *, nni_aio *);
+
+// nni_http_stream_scheme returns the underlying stream scheme for a given
+// upper layer scheme.
+extern const char *nni_http_stream_scheme(const char *);
 
 #endif // NNG_SUPPLEMENTAL_HTTP_HTTP_API_H

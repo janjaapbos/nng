@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2018 Devolutions <info@devolutions.net>
 //
@@ -157,6 +157,10 @@ extern void nni_plat_thr_fini(nni_plat_thr *);
 // prevention in callbacks, for example.)
 extern bool nni_plat_thr_is_self(nni_plat_thr *);
 
+// nni_plat_thr_set_name is used to set the thread name, which
+// should be a short ASCII string.  It may or may not be supported --
+// this is intended to facilitate debugging.
+extern void nni_plat_thr_set_name(nni_plat_thr *, const char *);
 //
 // Atomics support.  This will evolve over time.
 //
@@ -169,14 +173,52 @@ typedef struct nni_atomic_flag nni_atomic_flag;
 extern bool nni_atomic_flag_test_and_set(nni_atomic_flag *);
 extern void nni_atomic_flag_reset(nni_atomic_flag *);
 
+// nni_atomic_bool is for boolean flags that need to be checked without
+// changing their value.  This might require a lock on some systems.
+typedef struct nni_atomic_bool nni_atomic_bool;
+
+extern void nni_atomic_init_bool(nni_atomic_bool *);
+extern void nni_atomic_set_bool(nni_atomic_bool *, bool);
+extern bool nni_atomic_get_bool(nni_atomic_bool *);
+extern bool nni_atomic_swap_bool(nni_atomic_bool *, bool);
+
 typedef struct nni_atomic_u64 nni_atomic_u64;
 
 extern void     nni_atomic_init64(nni_atomic_u64 *);
-extern void     nni_atomic_inc64(nni_atomic_u64 *, uint64_t);
-extern void     nni_atomic_dec64(nni_atomic_u64 *, uint64_t);
+extern void     nni_atomic_add64(nni_atomic_u64 *, uint64_t);
+extern void     nni_atomic_sub64(nni_atomic_u64 *, uint64_t);
 extern uint64_t nni_atomic_get64(nni_atomic_u64 *);
 extern void     nni_atomic_set64(nni_atomic_u64 *, uint64_t);
 extern uint64_t nni_atomic_swap64(nni_atomic_u64 *, uint64_t);
+extern uint64_t nni_atomic_dec64_nv(nni_atomic_u64 *);
+extern void     nni_atomic_inc64(nni_atomic_u64 *);
+
+// nni_atomic_cas64 is a compare and swap.  The second argument is the
+// value to compare against, and the third is the new value. Returns
+// true if the value was set.
+extern bool nni_atomic_cas64(nni_atomic_u64 *, uint64_t, uint64_t);
+
+// In a lot of circumstances, we want a simple atomic reference count,
+// or atomic tunable values for integers like queue lengths or TTLs.
+// These native integer forms should be preferred over the 64 bit versions
+// unless larger bit sizes are truly needed.  They will be more efficient
+// on many platforms.
+typedef struct nni_atomic_int nni_atomic_int;
+
+extern void nni_atomic_init(nni_atomic_int *);
+extern void nni_atomic_add(nni_atomic_int *, int);
+extern void nni_atomic_sub(nni_atomic_int *, int);
+extern int  nni_atomic_get(nni_atomic_int *);
+extern void nni_atomic_set(nni_atomic_int *, int);
+extern int  nni_atomic_swap(nni_atomic_int *, int);
+extern int  nni_atomic_dec_nv(nni_atomic_int *);
+extern void nni_atomic_dec(nni_atomic_int *);
+extern void nni_atomic_inc(nni_atomic_int *);
+
+// nni_atomic_cas is a compare and swap.  The second argument is the
+// value to compare against, and the third is the new value. Returns
+// true if the value was set.
+extern bool nni_atomic_cas(nni_atomic_int *, int, int);
 
 //
 // Clock Support
@@ -184,7 +226,7 @@ extern uint64_t nni_atomic_swap64(nni_atomic_u64 *, uint64_t);
 
 // nn_plat_clock returns a number of milliseconds since some arbitrary time
 // in the past.  The values returned by nni_clock must use the same base
-// as the times used in nni_plat_cond_waituntil.  The nni_plat_clock() must
+// as the times used in nni_plat_cond_until.  The nni_plat_clock() must
 // return values > 0, and must return values smaller than 2^63.  (We could
 // relax this last constraint, but there is no reason to, and leaves us the
 // option of using negative values for other purposes in the future.)
@@ -197,17 +239,14 @@ extern void nni_plat_sleep(nni_duration);
 // Entropy Support
 //
 
-// nni_plat_seed_prng seeds the PRNG subsystem.  The specified number
-// of bytes of entropy should be stashed.  When possible, cryptographic
-// quality entropy sources should be used.  Note that today we prefer
-// to seed up to 256 bytes of data.
-extern void nni_plat_seed_prng(void *, size_t);
+// nni_random returns a cryptographically secure random uint32.
+uint32_t nni_random(void);
 
 // nni_plat_init is called to allow the platform the chance to
 // do any necessary initialization.  This routine MUST be idempotent,
-// and threadsafe, and will be called before any other API calls, and
+// and thread-safe, and will be called before any other API calls, and
 // may be called at any point thereafter.  It is permitted to return
-// an error if some critical failure inializing the platform occurs,
+// an error if some critical failure initializing the platform occurs,
 // but once this succeeds, all future calls must succeed as well, unless
 // nni_plat_fini has been called.
 //
@@ -241,32 +280,28 @@ extern int nni_tcp_dialer_init(nni_tcp_dialer **);
 extern void nni_tcp_dialer_fini(nni_tcp_dialer *);
 
 // nni_tcp_dialer_close closes the dialer.
-// Further operations on it should return NNG_ECLOSED.  Any in-progress
-// connection will be aborted.
+// Further operations on it should return NNG_ECLOSED.
+// Any in-progress connection will be aborted.
 extern void nni_tcp_dialer_close(nni_tcp_dialer *);
 
 // nni_tcp_dial attempts to create an outgoing connection,
 // asynchronously, to the address in the aio. On success, the first (and only)
 // output will be an nni_tcp_conn * associated with the remote server.
-extern void nni_tcp_dial(nni_tcp_dialer *, nni_aio *);
+extern void nni_tcp_dial(nni_tcp_dialer *, const nng_sockaddr *, nni_aio *);
 
-// nni_tcp_dialer_getopt gets an option from the dialer.
-extern int nni_tcp_dialer_setopt(
+// nni_tcp_dialer_set sets an option on the dialer.
+extern int nni_tcp_dialer_set(
     nni_tcp_dialer *, const char *, const void *, size_t, nni_type);
 
-// nni_tcp_dialer_setopt sets an option on the dialer. There is special
-// support for NNG_OPT_LOCADDR, which will be the source address (if legal)
-// for new connections, except that the port will be ignored.  The
-// NNG_OPT_TCP_NODELAY and NNG_OPT_TCP_KEEPALIVE options work to set the
-// initial values of those options on newly created connections.
-extern int nni_tcp_dialer_getopt(
+// nni_tcp_dialer_get gets an option on the dialer.
+extern int nni_tcp_dialer_get(
     nni_tcp_dialer *, const char *, void *, size_t *, nni_type);
 
 // nni_tcp_listener_init creates a new listener object, unbound.
 extern int nni_tcp_listener_init(nni_tcp_listener **);
 
 // nni_tcp_listener_fini frees the listener and all associated resources.
-// It implictly closes the listener as well.
+// It implicitly closes the listener as well.
 extern void nni_tcp_listener_fini(nni_tcp_listener *);
 
 // nni_tcp_listener_close closes the listener.  This will unbind
@@ -282,33 +317,32 @@ extern int nni_tcp_listener_listen(nni_tcp_listener *, const nni_sockaddr *);
 // associated with the remote peer.
 extern void nni_tcp_listener_accept(nni_tcp_listener *, nni_aio *);
 
-// nni_tcp_listener_getopt gets an option from the listener.
-extern int nni_tcp_listener_setopt(
+// nni_tcp_listener_set sets an option on the listener.
+extern int nni_tcp_listener_set(
     nni_tcp_listener *, const char *, const void *, size_t, nni_type);
 
-// nni_tcp_listener_setopt sets an option on the listener.  The most common
+// nni_tcp_listener_get gets an option from the listener.  The most common
 // use for this is to retrieve the setting of the NNG_OPT_TCP_LOCADDR
 // address after binding to wild card port (0).
-extern int nni_tcp_listener_getopt(
+extern int nni_tcp_listener_get(
     nni_tcp_listener *, const char *, void *, size_t *, nni_type);
 
-// nni_ntop obtains the IP address for the socket (enclosing it
-// in brackets if it is IPv6) and port.  Enough space for both must
-// be present (48 bytes and 6 bytes each), although if either is NULL then
-// those components are skipped.  This is based on inet_ntop.
-extern int nni_ntop(const nni_sockaddr *, char *, char *);
-
-// nni_tcp_resolv resolves a TCP name asynchronously.  The family
-// should be one of NNG_AF_INET, NNG_AF_INET6, or NNG_AF_UNSPEC.  The
-// first two constrain the name to those families, while the third will
+// nni_resolv_ip resolves a DNS host and service name asynchronously.
+// The family should be one of NNG_AF_INET, NNG_AF_INET6, or NNG_AF_UNSPEC.
+// The first two constrain the name to those families, while the third will
 // return names of either family.  The passive flag indicates that the
 // name will be used for bind(), otherwise the name will be used with
 // connect().  The host part may be NULL only if passive is true.
-extern void nni_tcp_resolv(const char *, const char *, int, int, nni_aio *);
+// Symbolic service names will be looked up assuming SOCK_STREAM, so
+// they may not work with UDP.
+extern void nni_resolv_ip(
+    const char *, const char *, int, bool, nng_sockaddr *sa, nni_aio *);
 
-// nni_udp_resolv is just like nni_tcp_resolv, but looks up
-// service names using UDP.
-extern void nni_udp_resolv(const char *, const char *, int, int, nni_aio *);
+// nni_parse_ip parses an IP address, without a port.
+extern int nni_parse_ip(const char *, nng_sockaddr *);
+
+// nni_parse_ip_port parses an IP address with an optional port appended.
+extern int nni_parse_ip_port(const char *, nng_sockaddr *);
 
 //
 // IPC (UNIX Domain Sockets & Named Pipes) Support.
@@ -323,7 +357,6 @@ typedef struct nni_ipc_listener nni_ipc_listener;
 // be stubs that just return NNG_ENOTSUP.
 extern int nni_ipc_dialer_alloc(nng_stream_dialer **, const nng_url *);
 extern int nni_ipc_listener_alloc(nng_stream_listener **, const nng_url *);
-extern int nni_ipc_checkopt(const char *, const void *, size_t, nni_type);
 
 //
 // UDP support. UDP is not connection oriented, and only has the notion

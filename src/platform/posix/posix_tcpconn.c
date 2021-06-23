@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -11,23 +11,15 @@
 
 #include "core/nng_impl.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/uio.h>
-#include <unistd.h>
-#ifdef NNG_HAVE_ALLOCA
-#include <alloca.h>
-#endif
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -52,29 +44,16 @@ tcp_dowrite(nni_tcp_conn *c)
 		unsigned      naiov;
 		nni_iov *     aiov;
 		struct msghdr hdr;
-#ifdef NNG_HAVE_ALLOCA
-		struct iovec *iovec;
-#else
-		struct iovec iovec[16];
-#endif
+		struct iovec  iovec[16];
 
 		memset(&hdr, 0, sizeof(hdr));
 		nni_aio_get_iov(aio, &naiov, &aiov);
 
-#ifdef NNG_HAVE_ALLOCA
-		if (naiov > 64) {
-			nni_aio_list_remove(aio);
-			nni_aio_finish_error(aio, NNG_EINVAL);
-			continue;
-		}
-		iovec = alloca(naiov * sizeof(*iovec));
-#else
 		if (naiov > NNI_NUM_ELEMENTS(iovec)) {
 			nni_aio_list_remove(aio);
 			nni_aio_finish_error(aio, NNG_EINVAL);
 			continue;
 		}
-#endif
 
 		for (niov = 0, i = 0; i < naiov; i++) {
 			if (aiov[i].iov_len > 0) {
@@ -128,32 +107,19 @@ tcp_doread(nni_tcp_conn *c)
 	}
 
 	while ((aio = nni_list_first(&c->readq)) != NULL) {
-		unsigned i;
-		int      n;
-		int      niov;
-		unsigned naiov;
-		nni_iov *aiov;
-#ifdef NNG_HAVE_ALLOCA
-		struct iovec *iovec;
-#else
+		unsigned     i;
+		int          n;
+		int          niov;
+		unsigned     naiov;
+		nni_iov *    aiov;
 		struct iovec iovec[16];
-#endif
 
 		nni_aio_get_iov(aio, &naiov, &aiov);
-#ifdef NNG_HAVE_ALLOCA
-		if (naiov > 64) {
-			nni_aio_list_remove(aio);
-			nni_aio_finish_error(aio, NNG_EINVAL);
-			continue;
-		}
-		iovec = alloca(naiov * sizeof(*iovec));
-#else
 		if (naiov > NNI_NUM_ELEMENTS(iovec)) {
 			nni_aio_list_remove(aio);
 			nni_aio_finish_error(aio, NNG_EINVAL);
 			continue;
 		}
-#endif
 		for (niov = 0, i = 0; i < naiov; i++) {
 			if (aiov[i].iov_len != 0) {
 				iovec[niov].iov_len  = aiov[i].iov_len;
@@ -180,7 +146,7 @@ tcp_doread(nni_tcp_conn *c)
 			// No bytes indicates a closed descriptor.
 			// This implicitly completes this (all!) aio.
 			nni_aio_list_remove(aio);
-			nni_aio_finish_error(aio, NNG_ECLOSED);
+			nni_aio_finish_error(aio, NNG_ECONNSHUT);
 			continue;
 		}
 
@@ -196,6 +162,24 @@ tcp_doread(nni_tcp_conn *c)
 }
 
 static void
+tcp_error(void *arg, int err)
+{
+	nni_tcp_conn *c = arg;
+	nni_aio *     aio;
+
+	nni_mtx_lock(&c->mtx);
+	while (((aio = nni_list_first(&c->readq)) != NULL) ||
+	    ((aio = nni_list_first(&c->writeq)) != NULL)) {
+		nni_aio_list_remove(aio);
+		nni_aio_finish_error(aio, err);
+	}
+	if (c->pfd != NULL) {
+		nni_posix_pfd_close(c->pfd);
+	}
+	nni_mtx_unlock(&c->mtx);
+}
+
+static void
 tcp_close(void *arg)
 {
 	nni_tcp_conn *c = arg;
@@ -208,7 +192,9 @@ tcp_close(void *arg)
 			nni_aio_list_remove(aio);
 			nni_aio_finish_error(aio, NNG_ECLOSED);
 		}
-		nni_posix_pfd_close(c->pfd);
+		if (c->pfd != NULL) {
+			nni_posix_pfd_close(c->pfd);
+		}
 	}
 	nni_mtx_unlock(&c->mtx);
 }
@@ -220,44 +206,50 @@ tcp_fini(void *arg)
 {
 	nni_tcp_conn *c = arg;
 	tcp_close(c);
-	nni_posix_pfd_fini(c->pfd);
-	nni_mtx_lock(&c->mtx); // not strictly needed, but shut up TSAN
-	c->pfd = NULL;
-	nni_mtx_unlock(&c->mtx);
+	if (c->pfd != NULL) {
+		nni_posix_pfd_fini(c->pfd);
+	}
 	nni_mtx_fini(&c->mtx);
 
+	if (c->dialer != NULL) {
+		nni_posix_tcp_dialer_rele(c->dialer);
+	}
 	NNI_FREE_STRUCT(c);
 }
 
+static nni_reap_list tcp_reap_list = {
+	.rl_offset = offsetof(nni_tcp_conn, reap),
+	.rl_func   = tcp_fini,
+};
 static void
 tcp_free(void *arg)
 {
 	nni_tcp_conn *c = arg;
-	nni_reap(&c->reap, tcp_fini, arg);
+	nni_reap(&tcp_reap_list, c);
 }
 
 static void
-tcp_cb(nni_posix_pfd *pfd, int events, void *arg)
+tcp_cb(nni_posix_pfd *pfd, unsigned events, void *arg)
 {
 	nni_tcp_conn *c = arg;
 
-	if (events & (POLLHUP | POLLERR | POLLNVAL)) {
-		tcp_close(c);
+	if (events & (NNI_POLL_HUP | NNI_POLL_ERR | NNI_POLL_INVAL)) {
+		tcp_error(c, NNG_ECONNSHUT);
 		return;
 	}
 	nni_mtx_lock(&c->mtx);
-	if (events & POLLIN) {
+	if ((events & NNI_POLL_IN) != 0) {
 		tcp_doread(c);
 	}
-	if (events & POLLOUT) {
+	if ((events & NNI_POLL_OUT) != 0) {
 		tcp_dowrite(c);
 	}
 	events = 0;
 	if (!nni_list_empty(&c->writeq)) {
-		events |= POLLOUT;
+		events |= NNI_POLL_OUT;
 	}
 	if (!nni_list_empty(&c->readq)) {
-		events |= POLLIN;
+		events |= NNI_POLL_IN;
 	}
 	if ((!c->closed) && (events != 0)) {
 		nni_posix_pfd_arm(pfd, events);
@@ -347,15 +339,15 @@ tcp_get_peername(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *          c = arg;
 	struct sockaddr_storage ss;
-	socklen_t               sslen = sizeof(ss);
-	int                     fd    = nni_posix_pfd_fd(c->pfd);
+	socklen_t               len = sizeof(ss);
+	int                     fd  = nni_posix_pfd_fd(c->pfd);
 	int                     rv;
 	nng_sockaddr            sa;
 
-	if (getpeername(fd, (void *) &ss, &sslen) != 0) {
+	if (getpeername(fd, (void *) &ss, &len) != 0) {
 		return (nni_plat_errno(errno));
 	}
-	if ((rv = nni_posix_sockaddr2nn(&sa, &ss)) == 0) {
+	if ((rv = nni_posix_sockaddr2nn(&sa, &ss, len)) == 0) {
 		rv = nni_copyout_sockaddr(&sa, buf, szp, t);
 	}
 	return (rv);
@@ -366,15 +358,15 @@ tcp_get_sockname(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *          c = arg;
 	struct sockaddr_storage ss;
-	socklen_t               sslen = sizeof(ss);
-	int                     fd    = nni_posix_pfd_fd(c->pfd);
+	socklen_t               len = sizeof(ss);
+	int                     fd  = nni_posix_pfd_fd(c->pfd);
 	int                     rv;
 	nng_sockaddr            sa;
 
-	if (getsockname(fd, (void *) &ss, &sslen) != 0) {
+	if (getsockname(fd, (void *) &ss, &len) != 0) {
 		return (nni_plat_errno(errno));
 	}
-	if ((rv = nni_posix_sockaddr2nn(&sa, &ss)) == 0) {
+	if ((rv = nni_posix_sockaddr2nn(&sa, &ss, len)) == 0) {
 		rv = nni_copyout_sockaddr(&sa, buf, szp, t);
 	}
 	return (rv);
@@ -475,30 +467,29 @@ static const nni_option tcp_options[] = {
 };
 
 static int
-tcp_getx(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
+tcp_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *c = arg;
 	return (nni_getopt(tcp_options, name, c, buf, szp, t));
 }
 
 static int
-tcp_setx(void *arg, const char *name, const void *buf, size_t sz, nni_type t)
+tcp_set(void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	nni_tcp_conn *c = arg;
 	return (nni_setopt(tcp_options, name, c, buf, sz, t));
 }
 
 int
-nni_posix_tcp_init(nni_tcp_conn **cp, nni_posix_pfd *pfd)
+nni_posix_tcp_alloc(nni_tcp_conn **cp, nni_tcp_dialer *d)
 {
 	nni_tcp_conn *c;
-
 	if ((c = NNI_ALLOC_STRUCT(c)) == NULL) {
 		return (NNG_ENOMEM);
 	}
 
 	c->closed = false;
-	c->pfd    = pfd;
+	c->dialer = d;
 
 	nni_mtx_init(&c->mtx);
 	nni_aio_list_init(&c->readq);
@@ -508,11 +499,17 @@ nni_posix_tcp_init(nni_tcp_conn **cp, nni_posix_pfd *pfd)
 	c->stream.s_close = tcp_close;
 	c->stream.s_recv  = tcp_recv;
 	c->stream.s_send  = tcp_send;
-	c->stream.s_getx  = tcp_getx;
-	c->stream.s_setx  = tcp_setx;
+	c->stream.s_get   = tcp_get;
+	c->stream.s_set   = tcp_set;
 
 	*cp = c;
 	return (0);
+}
+
+void
+nni_posix_tcp_init(nni_tcp_conn *c, nni_posix_pfd *pfd)
+{
+	c->pfd = pfd;
 }
 
 void

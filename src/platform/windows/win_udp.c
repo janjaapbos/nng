@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -216,7 +216,7 @@ udp_recv_cb(nni_win_io *io, int rv, size_t num)
 	udp_recv_start(u);
 	nni_mtx_unlock(&u->lk);
 
-	nni_aio_finish_synch(aio, rv, num);
+	nni_aio_finish_sync(aio, rv, num);
 }
 
 static void
@@ -307,10 +307,9 @@ nni_plat_udp_sockname(nni_plat_udp *udp, nni_sockaddr *sa)
 {
 	SOCKADDR_STORAGE ss;
 	int              sz;
-	int              rv;
 
 	sz = sizeof(ss);
-	if ((rv = getsockname(udp->s, (SOCKADDR *) &ss, &sz)) < 0) {
+	if (getsockname(udp->s, (SOCKADDR *) &ss, &sz) < 0) {
 		return (nni_win_error(GetLastError()));
 	}
 	return (nni_win_sockaddr2nn(sa, &ss));

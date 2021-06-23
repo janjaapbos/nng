@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2018 Devolutions <info@devolutions.net>
 //
@@ -114,7 +114,7 @@ tcp_listener_doaccept(nni_tcp_listener *l)
 			case EWOULDBLOCK:
 #endif
 #endif
-				rv = nni_posix_pfd_arm(l->pfd, POLLIN);
+				rv = nni_posix_pfd_arm(l->pfd, NNI_POLL_IN);
 				if (rv != 0) {
 					nni_aio_list_remove(aio);
 					nni_aio_finish_error(aio, rv);
@@ -136,19 +136,22 @@ tcp_listener_doaccept(nni_tcp_listener *l)
 			}
 		}
 
-		if ((rv = nni_posix_pfd_init(&pfd, newfd)) != 0) {
+		if ((rv = nni_posix_tcp_alloc(&c, NULL)) != 0) {
 			close(newfd);
 			nni_aio_list_remove(aio);
 			nni_aio_finish_error(aio, rv);
 			continue;
 		}
 
-		if ((rv = nni_posix_tcp_init(&c, pfd)) != 0) {
-			nni_posix_pfd_fini(pfd);
+		if ((rv = nni_posix_pfd_init(&pfd, newfd)) != 0) {
+			close(newfd);
+			nng_stream_free(&c->stream);
 			nni_aio_list_remove(aio);
 			nni_aio_finish_error(aio, rv);
 			continue;
 		}
+
+		nni_posix_tcp_init(c, pfd);
 
 		ka = l->keepalive ? 1 : 0;
 		nd = l->nodelay ? 1 : 0;
@@ -160,13 +163,13 @@ tcp_listener_doaccept(nni_tcp_listener *l)
 }
 
 static void
-tcp_listener_cb(nni_posix_pfd *pfd, int events, void *arg)
+tcp_listener_cb(nni_posix_pfd *pfd, unsigned events, void *arg)
 {
 	nni_tcp_listener *l = arg;
 	NNI_ARG_UNUSED(pfd);
 
 	nni_mtx_lock(&l->mtx);
-	if (events & POLLNVAL) {
+	if ((events & NNI_POLL_INVAL) != 0) {
 		tcp_listener_doclose(l);
 		nni_mtx_unlock(&l->mtx);
 		return;
@@ -330,7 +333,7 @@ tcp_listener_get_locaddr(void *arg, void *buf, size_t *szp, nni_type t)
 		socklen_t               len = sizeof(ss);
 		(void) getsockname(
 		    nni_posix_pfd_fd(l->pfd), (void *) &ss, &len);
-		(void) nni_posix_sockaddr2nn(&sa, &ss);
+		(void) nni_posix_sockaddr2nn(&sa, &ss, len);
 	} else {
 		sa.s_family = NNG_AF_UNSPEC;
 	}
@@ -413,14 +416,14 @@ static const nni_option tcp_listener_options[] = {
 };
 
 int
-nni_tcp_listener_getopt(
+nni_tcp_listener_get(
     nni_tcp_listener *l, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	return (nni_getopt(tcp_listener_options, name, l, buf, szp, t));
 }
 
 int
-nni_tcp_listener_setopt(nni_tcp_listener *l, const char *name, const void *buf,
+nni_tcp_listener_set(nni_tcp_listener *l, const char *name, const void *buf,
     size_t sz, nni_type t)
 {
 	return (nni_setopt(tcp_listener_options, name, l, buf, sz, t));

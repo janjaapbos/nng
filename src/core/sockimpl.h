@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -15,25 +15,6 @@
 // and pipes.  This must not be exposed to other subsystems -- these internals
 // are subject to change at any time.
 
-typedef struct nni_dialer_stats {
-	nni_stat_item s_root;
-	nni_stat_item s_id;
-	nni_stat_item s_sock;
-	nni_stat_item s_url;
-	nni_stat_item s_npipes;
-	nni_stat_item s_connok;
-	nni_stat_item s_refused;
-	nni_stat_item s_discon;
-	nni_stat_item s_canceled;
-	nni_stat_item s_othererr;
-	nni_stat_item s_etimedout;
-	nni_stat_item s_eproto; // protocol error
-	nni_stat_item s_eauth;
-	nni_stat_item s_enomem;
-	nni_stat_item s_reject;
-	char          s_scope[24]; // scope name for stats
-} nni_dialer_stats;
-
 struct nni_dialer {
 	nni_tran_dialer_ops d_ops;  // transport ops
 	nni_tran *          d_tran; // transport pointer
@@ -42,41 +23,40 @@ struct nni_dialer {
 	nni_list_node       d_node; // per socket list
 	nni_sock *          d_sock;
 	nni_url *           d_url;
-	nni_pipe *          d_pipe; // active pipe (for redialer)
-	int                 d_refcnt;
+	nni_pipe *          d_pipe; // active pipe (for re-dialer)
+	int                 d_ref;
 	bool                d_closed; // full shutdown
 	bool                d_closing;
 	nni_atomic_flag     d_started;
 	nni_mtx             d_mtx;
 	nni_list            d_pipes;
 	nni_aio *           d_user_aio;
-	nni_aio *           d_con_aio;
-	nni_aio *           d_tmo_aio;  // backoff timer
+	nni_aio             d_con_aio;
+	nni_aio             d_tmo_aio;  // backoff timer
 	nni_duration        d_maxrtime; // maximum time for reconnect
 	nni_duration        d_currtime; // current time for reconnect
 	nni_duration        d_inirtime; // initial time for reconnect
 	nni_time            d_conntime; // time of last good connect
-	nni_reap_item       d_reap;
-	nni_dialer_stats    d_stats;
-};
+	nni_reap_node       d_reap;
 
-typedef struct nni_listener_stats {
-	nni_stat_item s_root;
-	nni_stat_item s_id;
-	nni_stat_item s_sock;
-	nni_stat_item s_url;
-	nni_stat_item s_npipes;
-	nni_stat_item s_accept;
-	nni_stat_item s_discon; // aborted remotely
-	nni_stat_item s_canceled;
-	nni_stat_item s_othererr;
-	nni_stat_item s_etimedout;
-	nni_stat_item s_eproto; // protocol error
-	nni_stat_item s_eauth;
-	nni_stat_item s_enomem;
-	nni_stat_item s_reject;
-	char          s_scope[24]; // scope name for stats
-} nni_listener_stats;
+#ifdef NNG_ENABLE_STATS
+	nni_stat_item st_root;
+	nni_stat_item st_id;
+	nni_stat_item st_sock;
+	nni_stat_item st_url;
+	nni_stat_item st_pipes;
+	nni_stat_item st_connect;
+	nni_stat_item st_refused;
+	nni_stat_item st_disconnect; // aborted remotely
+	nni_stat_item st_canceled;
+	nni_stat_item st_other;
+	nni_stat_item st_timeout;
+	nni_stat_item st_proto; // protocol error
+	nni_stat_item st_auth;
+	nni_stat_item st_oom;
+	nni_stat_item st_reject;
+#endif
+};
 
 struct nni_listener {
 	nni_tran_listener_ops l_ops;  // transport ops
@@ -86,33 +66,38 @@ struct nni_listener {
 	nni_list_node         l_node; // per socket list
 	nni_sock *            l_sock;
 	nni_url *             l_url;
-	int                   l_refcnt;
+	int                   l_ref;
 	bool                  l_closed;  // full shutdown
 	bool                  l_closing; // close started (shutdown)
 	nni_atomic_flag       l_started;
 	nni_list              l_pipes;
-	nni_aio *             l_acc_aio;
-	nni_aio *             l_tmo_aio;
-	nni_reap_item         l_reap;
-	nni_listener_stats    l_stats;
-};
+	nni_aio               l_acc_aio;
+	nni_aio               l_tmo_aio;
+	nni_reap_node         l_reap;
 
-typedef struct nni_pipe_stats {
-	nni_stat_item s_root;
-	nni_stat_item s_id;
-	nni_stat_item s_ep_id;
-	nni_stat_item s_sock_id;
-	nni_stat_item s_rxmsgs;
-	nni_stat_item s_txmsgs;
-	nni_stat_item s_rxbytes;
-	nni_stat_item s_txbytes;
-	char          s_scope[16]; // scope name for stats ("pipe" is short)
-} nni_pipe_stats;
+#ifdef NNG_ENABLE_STATS
+	nni_stat_item st_root;
+	nni_stat_item st_id;
+	nni_stat_item st_sock;
+	nni_stat_item st_url;
+	nni_stat_item st_pipes;
+	nni_stat_item st_accept;
+	nni_stat_item st_disconnect; // aborted remotely
+	nni_stat_item st_canceled;
+	nni_stat_item st_other;
+	nni_stat_item st_timeout;
+	nni_stat_item st_proto; // protocol error
+	nni_stat_item st_auth;
+	nni_stat_item st_oom;
+	nni_stat_item st_reject;
+#endif
+};
 
 struct nni_pipe {
 	uint32_t           p_id;
 	nni_tran_pipe_ops  p_tran_ops;
 	nni_proto_pipe_ops p_proto_ops;
+	size_t             p_size;
 	void *             p_tran_data;
 	void *             p_proto_data;
 	nni_list_node      p_sock_node;
@@ -123,11 +108,21 @@ struct nni_pipe {
 	bool               p_closed;
 	nni_atomic_flag    p_stop;
 	bool               p_cbs;
-	int                p_refcnt;
+	int                p_ref;
 	nni_mtx            p_mtx;
 	nni_cv             p_cv;
-	nni_reap_item      p_reap;
-	nni_pipe_stats     p_stats;
+	nni_reap_node      p_reap;
+
+#ifdef NNG_ENABLE_STATS
+	nni_stat_item st_root;
+	nni_stat_item st_id;
+	nni_stat_item st_ep_id;
+	nni_stat_item st_sock_id;
+	nni_stat_item st_rx_msgs;
+	nni_stat_item st_tx_msgs;
+	nni_stat_item st_rx_bytes;
+	nni_stat_item st_tx_bytes;
+#endif
 };
 
 extern int nni_sock_add_dialer(nni_sock *, nni_dialer *);

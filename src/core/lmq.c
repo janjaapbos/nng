@@ -1,5 +1,5 @@
 //
-// Copyright 2019 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 //
 // This software is supplied under the terms of the MIT License, a
 // copy of which should be located in the distribution where this
@@ -22,7 +22,7 @@ nni_lmq_init(nni_lmq *lmq, size_t cap)
 	// operations as a power of two, for efficiency.  It does possibly
 	// waste some space, but never more than 2x.  Consumers should try
 	// for powers of two if they are concerned about efficiency.
-	alloc = 1;
+	alloc = 2;
 	while (alloc < cap) {
 		alloc *= 2;
 	}
@@ -32,7 +32,7 @@ nni_lmq_init(nni_lmq *lmq, size_t cap)
 	}
 	lmq->lmq_cap   = cap;
 	lmq->lmq_alloc = alloc;
-	lmq->lmq_mask  = (cap - 1);
+	lmq->lmq_mask  = (alloc - 1);
 	lmq->lmq_len   = 0;
 	lmq->lmq_get   = 0;
 	lmq->lmq_put   = 0;
@@ -127,7 +127,7 @@ nni_lmq_resize(nni_lmq *lmq, size_t cap)
 	size_t    alloc;
 	size_t    len;
 
-	alloc = 1;
+	alloc = 2;
 	while (alloc < cap) {
 		alloc *= 2;
 	}

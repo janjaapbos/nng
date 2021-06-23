@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2021 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -18,6 +18,9 @@ static nni_mtx  nni_init_mtx;
 static nni_list nni_init_list;
 static bool     nni_inited = false;
 
+extern int nni_tls_sys_init(void);
+extern void nni_tls_sys_fini(void);
+
 static int
 nni_init_helper(void)
 {
@@ -26,17 +29,24 @@ nni_init_helper(void)
 	nni_mtx_init(&nni_init_mtx);
 	NNI_LIST_INIT(&nni_init_list, nni_initializer, i_node);
 	nni_inited = true;
+#ifdef NNG_TEST_LIB
+	static bool cleanup = false;
+	if (!cleanup) {
+		atexit(nng_fini);
+		cleanup = true;
+	}
+#endif
 
 	if (((rv = nni_stat_sys_init()) != 0) ||
 	    ((rv = nni_taskq_sys_init()) != 0) ||
 	    ((rv = nni_reap_sys_init()) != 0) ||
 	    ((rv = nni_timer_sys_init()) != 0) ||
 	    ((rv = nni_aio_sys_init()) != 0) ||
-	    ((rv = nni_random_sys_init()) != 0) ||
 	    ((rv = nni_sock_sys_init()) != 0) ||
 	    ((rv = nni_listener_sys_init()) != 0) ||
 	    ((rv = nni_dialer_sys_init()) != 0) ||
 	    ((rv = nni_pipe_sys_init()) != 0) ||
+	    ((rv = nni_tls_sys_init()) != 0) ||
 	    ((rv = nni_proto_sys_init()) != 0) ||
 	    ((rv = nni_tran_sys_init()) != 0)) {
 		nni_fini();
@@ -72,12 +82,12 @@ nni_fini(void)
 	}
 	nni_tran_sys_fini();
 	nni_proto_sys_fini();
+	nni_tls_sys_fini();
 	nni_pipe_sys_fini();
 	nni_dialer_sys_fini();
 	nni_listener_sys_fini();
 	nni_sock_sys_fini();
 	nni_reap_drain();
-	nni_random_sys_fini();
 	nni_aio_sys_fini();
 	nni_timer_sys_fini();
 	nni_taskq_sys_fini();

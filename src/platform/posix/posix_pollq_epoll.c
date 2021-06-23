@@ -1,5 +1,5 @@
 //
-// Copyright 2018 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2020 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2018 Liam Staskawicz <liam@stask.net>
 //
@@ -35,7 +35,7 @@ typedef struct nni_posix_pollq nni_posix_pollq;
 #define NNI_MAX_EPOLL_EVENTS 64
 
 // flags we always want enabled as long as at least one event is active
-#define NNI_EPOLL_FLAGS (EPOLLONESHOT | EPOLLERR)
+#define NNI_EPOLL_FLAGS ((unsigned) EPOLLONESHOT | (unsigned) EPOLLERR)
 
 // Locking strategy:
 //
@@ -61,15 +61,15 @@ struct nni_posix_pollq {
 };
 
 struct nni_posix_pfd {
-	nni_posix_pollq *pq;
 	nni_list_node    node;
+	nni_posix_pollq *pq;
 	int              fd;
 	nni_posix_pfd_cb cb;
 	void *           arg;
 	bool             closed;
 	bool             closing;
 	bool             reap;
-	int              events;
+	unsigned         events;
 	nni_mtx          mtx;
 	nni_cv           cv;
 };
@@ -96,7 +96,6 @@ nni_posix_pfd_init(nni_posix_pfd **pfdp, int fd)
 	nni_mtx_init(&pfd->mtx);
 	nni_cv_init(&pfd->cv, &pq->mtx);
 
-	nni_mtx_lock(&pfd->mtx);
 	pfd->pq      = pq;
 	pfd->fd      = fd;
 	pfd->cb      = NULL;
@@ -106,15 +105,15 @@ nni_posix_pfd_init(nni_posix_pfd **pfdp, int fd)
 	pfd->closed  = false;
 
 	NNI_LIST_NODE_INIT(&pfd->node);
-	nni_mtx_unlock(&pfd->mtx);
 
 	// notifications disabled to begin with
 	ev.events   = 0;
 	ev.data.ptr = pfd;
 
-	if ((rv = epoll_ctl(pq->epfd, EPOLL_CTL_ADD, fd, &ev)) != 0) {
+	if (epoll_ctl(pq->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
 		rv = nni_plat_errno(errno);
 		nni_cv_fini(&pfd->cv);
+		nni_mtx_fini(&pfd->mtx);
 		NNI_FREE_STRUCT(pfd);
 		return (rv);
 	}
@@ -124,7 +123,7 @@ nni_posix_pfd_init(nni_posix_pfd **pfdp, int fd)
 }
 
 int
-nni_posix_pfd_arm(nni_posix_pfd *pfd, int events)
+nni_posix_pfd_arm(nni_posix_pfd *pfd, unsigned events)
 {
 	nni_posix_pollq *pq = pfd->pq;
 
@@ -191,28 +190,29 @@ nni_posix_pfd_fini(nni_posix_pfd *pfd)
 
 	// We have to synchronize with the pollq thread (unless we are
 	// on that thread!)
-	if (!nni_thr_is_self(&pq->thr)) {
+	NNI_ASSERT(!nni_thr_is_self(&pq->thr));
 
-		uint64_t one = 1;
+	uint64_t one = 1;
 
-		nni_mtx_lock(&pq->mtx);
-		nni_list_append(&pq->reapq, pfd);
+	nni_mtx_lock(&pq->mtx);
+	nni_list_append(&pq->reapq, pfd);
 
-		// Wake the remote side.  For now we assume this always
-		// succeeds.  The only failure modes here occur when we
-		// have already excessively signaled this (2^64 times
-		// with no read!!), or when the evfd is closed, or some
-		// kernel bug occurs.  Those errors would manifest as
-		// a hang waiting for the poller to reap the pfd in fini,
-		// if it were possible for them to occur.  (Barring other
-		// bugs, it isn't.)
-		(void) write(pq->evfd, &one, sizeof(one));
-
-		while (!pfd->closed) {
-			nni_cv_wait(&pfd->cv);
-		}
-		nni_mtx_unlock(&pq->mtx);
+	// Wake the remote side.  For now we assume this always
+	// succeeds.  The only failure modes here occur when we
+	// have already excessively signaled this (2^64 times
+	// with no read!!), or when the evfd is closed, or some
+	// kernel bug occurs.  Those errors would manifest as
+	// a hang waiting for the poller to reap the pfd in fini,
+	// if it were possible for them to occur.  (Barring other
+	// bugs, it isn't.)
+	if (write(pq->evfd, &one, sizeof(one)) != sizeof(one)) {
+		nni_panic("BUG! write to epoll fd incorrect!");
 	}
+
+	while (!pfd->closed) {
+		nni_cv_wait(&pfd->cv);
+	}
+	nni_mtx_unlock(&pq->mtx);
 
 	// We're exclusive now.
 
@@ -260,28 +260,33 @@ nni_posix_poll_thr(void *arg)
 
 			ev = &events[i];
 			// If the waker pipe was signaled, read from it.
-			if ((ev->data.ptr == NULL) && (ev->events & POLLIN)) {
+			if ((ev->data.ptr == NULL) &&
+			    (ev->events & (unsigned) POLLIN)) {
 				uint64_t clear;
-				(void) read(pq->evfd, &clear, sizeof(clear));
+				if (read(pq->evfd, &clear, sizeof(clear)) !=
+				    sizeof(clear)) {
+					nni_panic("read from evfd incorrect!");
+				}
 				reap = true;
 			} else {
 				nni_posix_pfd *  pfd = ev->data.ptr;
 				nni_posix_pfd_cb cb;
-				void *           arg;
-				int              events;
+				void *           cbarg;
+				unsigned         mask;
 
-				events = ev->events &
-				    (EPOLLIN | EPOLLOUT | EPOLLERR);
+				mask = ev->events &
+				    ((unsigned) EPOLLIN | (unsigned) EPOLLOUT |
+				        (unsigned) EPOLLERR);
 
 				nni_mtx_lock(&pfd->mtx);
-				pfd->events &= ~events;
-				cb  = pfd->cb;
-				arg = pfd->arg;
+				pfd->events &= ~mask;
+				cb    = pfd->cb;
+				cbarg = pfd->arg;
 				nni_mtx_unlock(&pfd->mtx);
 
 				// Execute the callback with lock released
 				if (cb != NULL) {
-					cb(pfd, events, arg);
+					cb(pfd, mask, cbarg);
 				}
 			}
 		}
@@ -305,7 +310,12 @@ nni_posix_pollq_destroy(nni_posix_pollq *pq)
 
 	nni_mtx_lock(&pq->mtx);
 	pq->close = true;
-	(void) write(pq->evfd, &one, sizeof(one));
+
+	if (write(pq->evfd, &one, sizeof(one)) != sizeof(one)) {
+		// This should never occur, and if it does it could
+		// lead to a hang.
+		nni_panic("BUG! unable to write to evfd!");
+	}
 	nni_mtx_unlock(&pq->mtx);
 
 	nni_thr_fini(&pq->thr);
@@ -377,6 +387,7 @@ nni_posix_pollq_create(nni_posix_pollq *pq)
 		nni_mtx_fini(&pq->mtx);
 		return (rv);
 	}
+	nni_thr_set_name(&pq->thr, "nng:poll:epoll");
 	nni_thr_run(&pq->thr);
 	return (0);
 }
